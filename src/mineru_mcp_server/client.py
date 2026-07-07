@@ -20,59 +20,43 @@ class MinerUClient:
         return r.json()
 
     # ── 同步解析 ──────────────────────────────────────
-    def sync_parse(
-        self,
-        file_path: str,
-        form_data: dict,
-        response_format_zip: bool = True,
-    ) -> requests.Response:
+    def sync_parse(self, file_path: str, form_data: dict) -> requests.Response:
         """POST /file_parse — 上传文件并同步等待解析结果。
 
         Args:
             file_path: 本地文件路径
-            form_data: 已序列化的表单字段（来自 ParseOptions.to_form_data()）
-            response_format_zip: True 返回 ZIP，False 返回 JSON
+            form_data: 已序列化的表单字段（来自 ParseDocumentInput.to_form_data()，
+                已包含 return_md / response_format_zip 等所有参数）
 
         Returns:
-            requests.Response — 200 时 body 为 ZIP 或 JSON
+            requests.Response — 200 时 body 为 ZIP 或 JSON，取决于 form_data 里的 response_format_zip
         """
-        data = {
-            **form_data,
-            "return_md": "true",
-            "response_format_zip": str(response_format_zip).lower(),
-        }
         filename = os.path.basename(file_path)
         with open(file_path, "rb") as f:
             return requests.post(
                 f"{self.base_url}/file_parse",
                 files={"files": (filename, f)},
-                data=data,
+                data=form_data,
                 timeout=self.timeout,
             )
 
     # ── 异步提交 ──────────────────────────────────────
-    def submit_task(
-        self,
-        file_path: str,
-        form_data: dict,
-        response_format_zip: bool = True,
-    ) -> dict:
+    def submit_task(self, file_path: str, form_data: dict) -> dict:
         """POST /tasks — 提交异步解析任务，立即返回。
+
+        Args:
+            file_path: 本地文件路径
+            form_data: 已序列化的表单字段（来自 SubmitTaskInput.to_form_data()）
 
         Returns:
             dict: {"task_id": "...", "status": "queued", ...}
         """
-        data = {
-            **form_data,
-            "return_md": "true",
-            "response_format_zip": str(response_format_zip).lower(),
-        }
         filename = os.path.basename(file_path)
         with open(file_path, "rb") as f:
             r = requests.post(
                 f"{self.base_url}/tasks",
                 files={"files": (filename, f)},
-                data=data,
+                data=form_data,
                 timeout=self.timeout,
             )
         r.raise_for_status()

@@ -1,19 +1,22 @@
-"""MinerU MCP Server — 5 个工具覆盖 DocParse API 全部端点。"""
+"""MinerU MCP Server — 5 个工具覆盖 DocParse API 全部端点。
+
+保存路径不是接口参数：所有结果统一存到 MINERU_OUTPUT_DIR 环境变量指定的目录，
+这是 server 启动时的固定配置。MinerU 返回什么格式就原样存成什么格式（.zip 或 .json），
+本项目不做解压或内容解析。
+"""
 
 import os
-import shutil
-import zipfile
-from typing import Any
+from datetime import datetime, timezone
 
 import requests
 from fastmcp import FastMCP
 
 from .client import get_client
 from .models import (
-    AsyncSubmitInput,
-    SyncParseInput,
-    TaskQueryInput,
+    ParseDocumentInput,
+    SubmitTaskInput,
     TaskResultInput,
+    TaskStatusInput,
 )
 
 # ── 服务 ───────────────────────────────────────────────
@@ -21,78 +24,54 @@ mcp = FastMCP("mineru_mcp")
 
 
 # ── 工具函数 ───────────────────────────────────────────
-def _resolve_output_dir(output_dir: str | None) -> tuple[str | None, dict | None]:
-    """解析实际使用的输出目录：优先用户传入值，否则回退 MINERU_OUTPUT_DIR 环境变量。
+def _get_output_dir() -> tuple[str | None, dict | None]:
+    """从 MINERU_OUTPUT_DIR 环境变量读取输出目录。这是 server 级配置，不是接口参数。
 
     Returns:
-        (output_dir, error) — 成功时 error 为 None；都未提供时 output_dir 为 None 且 error 是错误 dict。
+        (output_dir, error) — 成功时 error 为 None；未配置或配置不合法时 output_dir 为 None。
     """
-    resolved = output_dir or os.getenv("MINERU_OUTPUT_DIR")
-    if not resolved:
+    output_dir = os.getenv("MINERU_OUTPUT_DIR")
+    if not output_dir:
         return None, {
             "success": False,
-            "error": "未指定 output_dir，且未设置 MINERU_OUTPUT_DIR 环境变量，无法确定文件保存位置",
+            "error": "服务未配置 MINERU_OUTPUT_DIR 环境变量，无法确定文件保存位置。"
+            "请在启动 mineru-docparse-mcp 时设置该环境变量后重试",
         }
-    if not os.path.isabs(resolved):
+    if not os.path.isabs(output_dir):
         return None, {
             "success": False,
-            "error": f"MINERU_OUTPUT_DIR 必须是绝对路径: {resolved}",
+            "error": f"MINERU_OUTPUT_DIR 必须是绝对路径: {output_dir}",
         }
-    return resolved, None
+    return output_dir, None
 
 
-def _safe_extract(zf: zipfile.ZipFile, extract_dir: str) -> None:
-    """校验 ZIP 内条目不会借由 `../` 等路径穿越写出到 extract_dir 之外，再解压。"""
-    extract_dir_abs = os.path.abspath(extract_dir)
-    for name in zf.namelist():
-        dest = os.path.abspath(os.path.join(extract_dir_abs, name))
-        if dest != extract_dir_abs and not dest.startswith(extract_dir_abs + os.sep):
-            raise ValueError(f"检测到不安全的 ZIP 路径，已阻止解压: {name}")
-    zf.extractall(extract_dir_abs)
+def _save_response(content: bytes, content_type: str, base_name: str, output_dir: str) -> dict:
+    """把 MinerU 的响应原样存到磁盘，不解压、不解析内容。
 
-
-def _save_and_extract(
-    content: bytes,
-    file_name: str,
-    output_dir: str,
-    extract: bool = True,
-) -> dict:
-    """将 ZIP 字节写入磁盘并解压。
+    存成 .zip 还是 .json 完全由响应的 Content-Type 决定：
+    - zip / octet-stream → 原样存为 .zip
+    - json → 原样存为 .json（其中可能包含 md_content 等字段，取决于调用时的 return_* 参数）
 
     Returns:
-        {"zip_path": str, "zip_size": int, "extract_dir": str|None, "md_files": [str], "md_count": int}
+        {"saved_path": str, "file_size": int, "format": "zip"|"json"}
     """
     os.makedirs(output_dir, exist_ok=True)
-    base_name = os.path.splitext(file_name)[0]
 
-    zip_path = os.path.join(output_dir, f"{base_name}.zip")
-    with open(zip_path, "wb") as f:
+    if "json" in content_type:
+        ext, fmt = ".json", "json"
+    else:
+        ext, fmt = ".zip", "zip"
+
+    saved_path = os.path.join(output_dir, f"{base_name}{ext}")
+    # 同名文件已存在时加时间戳，避免覆盖历史结果
+    if os.path.exists(saved_path):
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        saved_path = os.path.join(output_dir, f"{base_name}_{stamp}{ext}")
+
+    with open(saved_path, "wb") as f:
         f.write(content)
 
-    result: dict[str, Any] = {
-        "zip_path": zip_path,
-        "zip_size": len(content),
-        "extract_dir": None,
-        "md_files": [],
-        "md_count": 0,
-    }
-
-    if extract:
-        extract_dir = os.path.join(output_dir, base_name)
-        if os.path.isdir(extract_dir):
-            shutil.rmtree(extract_dir)
-        os.makedirs(extract_dir, exist_ok=True)
-
-        with zipfile.ZipFile(zip_path) as z:
-            _safe_extract(z, extract_dir)
-            for name in z.namelist():
-                if name.endswith(".md"):
-                    result["md_files"].append(os.path.join(extract_dir, name))
-
-        result["extract_dir"] = extract_dir
-        result["md_count"] = len(result["md_files"])
-
-    return result
+    return {"saved_path": saved_path, "file_size": len(content), "format": fmt}
 
 
 def _handle_client_error(e: Exception) -> dict:
@@ -125,54 +104,47 @@ def _handle_client_error(e: Exception) -> dict:
         "openWorldHint": True,
     },
 )
-def mineru_parse_document(params: SyncParseInput) -> dict:
-    """【默认优先使用】同步解析本地文档，等待完成后将 Markdown 保存到指定目录。
+def mineru_parse_document(params: ParseDocumentInput) -> dict:
+    """【默认优先使用】同步解析本地文档，等待完成后将结果保存到磁盘。
 
     这是文档解析的默认工具。除非文件明显很大（约超过 100 页）、
     或用户明确要求后台/异步处理，否则应始终优先调用本工具，
     而不是 mineru_submit_task。
 
-    上传文件到 MinerU DocParse API，同步等待解析完成，下载 ZIP 并解压。
+    上传文件到 MinerU DocParse API，同步等待解析完成。返回内容原样保存：
+    response_format_zip=true（默认）时存为 .zip，为 false 时存为 .json，不做解压或内容解析。
     适合中小文件（<100 页），大文件请使用 mineru_submit_task 异步接口。
 
+    结果保存目录由服务端 MINERU_OUTPUT_DIR 环境变量决定，不是本工具的参数。
+
     Args:
-        params (SyncParseInput): 包含 file_path、output_dir（可选，缺省用 MINERU_OUTPUT_DIR）及所有解析选项
+        params (ParseDocumentInput): 见 ParseDocumentInput 各字段说明
 
     Returns:
         dict:
-        成功: {"success": true, "file_name": str, "zip_path": str, "zip_size": int,
-                "extract_dir": str, "md_files": [str], "md_count": int}
+        成功: {"success": true, "file_name": str, "saved_path": str, "file_size": int, "format": "zip"|"json"}
         失败: {"success": false, "error": str}
     """
-    client = get_client()
-
-    # 文件检查
     if not os.path.isfile(params.file_path):
         return {"success": False, "error": f"文件不存在: {params.file_path}"}
 
-    output_dir, err = _resolve_output_dir(params.output_dir)
+    output_dir, err = _get_output_dir()
     if err is not None:
         return err
 
+    client = get_client()
     form_data = params.to_form_data()
     file_name = os.path.basename(params.file_path)
+    base_name = os.path.splitext(file_name)[0]
 
     try:
-        response = client.sync_parse(params.file_path, form_data, response_format_zip=True)
+        response = client.sync_parse(params.file_path, form_data)
         response.raise_for_status()
     except Exception as e:
         return _handle_client_error(e)
 
-    # 检查是否真的拿到 ZIP
     content_type = response.headers.get("Content-Type", "")
-    if "zip" not in content_type and "octet-stream" not in content_type:
-        try:
-            body = response.json()
-            return {"success": False, "error": "API 返回了非 ZIP 响应", "detail": body}
-        except Exception:
-            return {"success": False, "error": f"非 ZIP 响应 (Content-Type: {content_type})"}
-
-    result = _save_and_extract(response.content, file_name, output_dir, params.extract_zip)
+    result = _save_response(response.content, content_type, base_name, output_dir)
     return {"success": True, "file_name": file_name, **result}
 
 
@@ -189,7 +161,7 @@ def mineru_parse_document(params: SyncParseInput) -> dict:
         "openWorldHint": True,
     },
 )
-def mineru_submit_task(params: AsyncSubmitInput) -> dict:
+def mineru_submit_task(params: SubmitTaskInput) -> dict:
     """提交文档到 MinerU 异步解析队列，立即返回 task_id。
 
     仅在文件较大（约超过 100 页）或用户明确要求后台/异步处理时使用。
@@ -199,7 +171,7 @@ def mineru_submit_task(params: AsyncSubmitInput) -> dict:
     完成后用 mineru_get_task_result 下载结果。
 
     Args:
-        params (AsyncSubmitInput): 包含 file_path 及所有解析选项
+        params (SubmitTaskInput): 见 SubmitTaskInput 各字段说明
 
     Returns:
         dict:
@@ -207,11 +179,10 @@ def mineru_submit_task(params: AsyncSubmitInput) -> dict:
                 "status_url": str, "result_url": str}
         失败: {"success": false, "error": str}
     """
-    client = get_client()
-
     if not os.path.isfile(params.file_path):
         return {"success": False, "error": f"文件不存在: {params.file_path}"}
 
+    client = get_client()
     try:
         result = client.submit_task(params.file_path, params.to_form_data())
         return {"success": True, **result}
@@ -232,11 +203,11 @@ def mineru_submit_task(params: AsyncSubmitInput) -> dict:
         "openWorldHint": True,
     },
 )
-def mineru_get_task_status(params: TaskQueryInput) -> dict:
+def mineru_get_task_status(params: TaskStatusInput) -> dict:
     """查询异步解析任务的当前状态。
 
     Args:
-        params (TaskQueryInput): 包含 task_id
+        params (TaskStatusInput): 包含 task_id
 
     Returns:
         dict:
@@ -251,7 +222,6 @@ def mineru_get_task_status(params: TaskQueryInput) -> dict:
         }
     """
     client = get_client()
-
     try:
         status = client.task_status(params.task_id)
         return {"success": True, **status}
@@ -273,26 +243,28 @@ def mineru_get_task_status(params: TaskQueryInput) -> dict:
     },
 )
 def mineru_get_task_result(params: TaskResultInput) -> dict:
-    """获取已完成异步任务的解析结果，保存 ZIP 并解压到指定目录。
+    """获取已完成异步任务的解析结果，原样保存到磁盘。
 
     仅当任务状态为 completed 时才能获取结果。
     建议先调用 mineru_get_task_status 确认状态后再取结果。
 
+    返回内容原样保存，不做解压或内容解析（是 .zip 还是 .json 取决于
+    提交任务时 response_format_zip 参数的取值）。
+    结果保存目录由服务端 MINERU_OUTPUT_DIR 环境变量决定，不是本工具的参数。
+
     Args:
-        params (TaskResultInput): 包含 task_id、output_dir（可选，缺省用 MINERU_OUTPUT_DIR）、extract_zip
+        params (TaskResultInput): 包含 task_id
 
     Returns:
         dict:
-        成功: {"success": true, "file_name": str, "zip_path": str,
-                "zip_size": int, "extract_dir": str, "md_files": [str], "md_count": int}
+        成功: {"success": true, "file_name": str, "saved_path": str, "file_size": int, "format": "zip"|"json"}
         失败: {"success": false, "error": str}
     """
-    output_dir, err = _resolve_output_dir(params.output_dir)
+    output_dir, err = _get_output_dir()
     if err is not None:
         return err
 
     client = get_client()
-
     try:
         response = client.task_result(params.task_id)
         response.raise_for_status()
@@ -301,36 +273,17 @@ def mineru_get_task_result(params: TaskResultInput) -> dict:
 
     content_type = response.headers.get("Content-Type", "")
 
-    # 任务未完成 → 返回 JSON 状态
-    if "application/json" in content_type:
-        try:
-            body = response.json()
-            return {
-                "success": False,
-                "error": f"任务尚未完成或不可用（status={body.get('status', 'unknown')}）",
-                "detail": body,
-            }
-        except Exception:
-            pass
+    file_name = f"{params.task_id}"
+    try:
+        st = client.task_status(params.task_id)
+        names = st.get("file_names", [])
+        if names:
+            file_name = os.path.splitext(names[0])[0]
+    except Exception:
+        pass
 
-    # ZIP 结果
-    if "zip" in content_type or "octet-stream" in content_type:
-        # 从 status 接口获取原始文件名（可选回退）
-        file_name = f"{params.task_id}.zip"
-        try:
-            st = client.task_status(params.task_id)
-            names = st.get("file_names", [])
-            if names:
-                file_name = names[0]
-        except Exception:
-            pass
-
-        result = _save_and_extract(
-            response.content, file_name, output_dir, params.extract_zip
-        )
-        return {"success": True, "file_name": file_name, **result}
-
-    return {"success": False, "error": f"未知响应格式 (Content-Type: {content_type})"}
+    result = _save_response(response.content, content_type, file_name, output_dir)
+    return {"success": True, "file_name": file_name, **result}
 
 
 # ═══════════════════════════════════════════════════════
@@ -378,10 +331,10 @@ def main():
     通过环境变量切换传输模式:
 
     stdio 模式（默认，本地子进程，适合 Claude Code / Cursor 等客户端）:
-        mineru-mcp-server
+        mineru-docparse-mcp
 
     Streamable HTTP 模式（远程服务，支持多客户端连接）:
-        MCP_TRANSPORT=streamable-http MCP_PORT=8001 mineru-mcp-server
+        MCP_TRANSPORT=streamable-http MCP_PORT=8001 mineru-docparse-mcp
     """
     transport = os.getenv("MCP_TRANSPORT", "stdio")
 
