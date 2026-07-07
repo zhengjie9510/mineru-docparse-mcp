@@ -4,12 +4,6 @@
 
 > 本项目只是协议封装层，本身不解析文档。使用前需要有一个可访问的 MinerU DocParse 服务，默认地址 `http://localhost:8000`。部署方式见 [MinerU 官方仓库](https://github.com/opendatalab/MinerU)。
 
-## 安装
-
-```bash
-pip install mineru-docparse-mcp
-```
-
 ## 配置到 Claude Code
 
 保存路径是服务端配置，不是接口参数，所以 `MINERU_OUTPUT_DIR` 必须在这里设置好，否则调用解析工具时会报错：
@@ -18,7 +12,8 @@ pip install mineru-docparse-mcp
 {
   "mcpServers": {
     "mineru": {
-      "command": "mineru-docparse-mcp",
+      "command": "uvx",
+      "args": ["mineru-docparse-mcp"],
       "env": {
         "MINERU_API_URL": "http://localhost:8000",
         "MINERU_OUTPUT_DIR": "/Users/yourname/Documents/mineru-output"
@@ -34,23 +29,18 @@ pip install mineru-docparse-mcp
 
 | 工具 | 用途 |
 |---|---|
-| `mineru_parse_document` | 解析文档，等待完成并直接把结果存到磁盘（默认用这个） |
-| `mineru_submit_task` | 提交大文件到后台解析，立即返回 `task_id` |
-| `mineru_get_task_status` | 查询后台任务进度 |
-| `mineru_get_task_result` | 后台任务完成后取结果并存到磁盘 |
+| `mineru_parse_document` | 将 PDF/Word/PPT/Excel 转为 Markdown，结果保存到磁盘 |
 | `mineru_health_check` | 检查 MinerU 服务是否正常 |
-
-普通文件直接说"帮我解析这个 PDF"就行，Claude 会用 `mineru_parse_document`。文件很大（上百页）时会自动改用后台任务的三个工具轮询。
 
 **结果怎么存**：MinerU 返回什么格式就原样存成什么格式，本项目不解压、不解析内容——`response_format_zip=true`（默认）时存成 `.zip`，为 `false` 时存成 `.json`。文件名与源文件同名，若目录下已有同名文件会自动加时间戳，不覆盖。
 
 ## 接口参数
 
-`mineru_parse_document` 和 `mineru_submit_task` 的参数完全一致，均对应 MinerU 官方 `/file_parse` 与 `/tasks` 接口的表单字段。
+`mineru_parse_document` 的参数与 MinerU 官方 `/file_parse` 接口一致：
 
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `file_path` | string | 必填 | 本地文档绝对路径（.docx/.pdf/.pptx/.xlsx 等） |
+| `file_path` | string | 必填 | 本地文档路径，支持绝对路径和相对路径 |
 | `backend` | enum | `hybrid-engine` | 解析后端，见下方「backend 可选值」 |
 | `lang_list` | string[] | `["ch"]` | OCR 语言列表，仅 `pipeline` 后端生效，见下方「lang_list 可选值」 |
 | `effort` | `medium` \| `high` | `medium` | 仅 `hybrid` 后端生效。`medium` 更快但不含图表分析；`high` 精度更高、含图表分析、耗时更长 |
@@ -69,12 +59,6 @@ pip install mineru-docparse-mcp
 | `client_side_output_generation` | bool | `false` | 是否把最终 Markdown/内容列表的生成推迟到客户端处理 |
 | `start_page_id` | int | `0` | 起始页码，从 0 开始 |
 | `end_page_id` | int | `99999` | 结束页码，从 0 开始 |
-
-`mineru_get_task_status` 和 `mineru_get_task_result` 只有一个参数：
-
-| 参数 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `task_id` | string | 必填 | 由 `mineru_submit_task` 返回的任务 ID |
 
 ### backend 可选值
 
@@ -97,7 +81,7 @@ pip install mineru-docparse-mcp
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `MINERU_API_URL` | `http://localhost:8000` | MinerU 服务地址 |
-| `MINERU_OUTPUT_DIR` | 无（必须设置） | 解析结果保存目录，绝对路径。不设置时调用解析工具会直接报错 |
+| `MINERU_OUTPUT_DIR` | 无（必须设置） | 解析结果保存目录，支持绝对路径和相对路径 |
 | `MINERU_API_TIMEOUT` | `600` | 请求超时秒数，大文件超时可调大 |
 | `MCP_TRANSPORT` | `stdio` | 传输模式：`stdio`（本地子进程）或 `streamable-http`（远程服务） |
 | `MCP_HOST` | `127.0.0.1` | 仅 HTTP 模式生效，监听地址，设为 `0.0.0.0` 可对外暴露 |
@@ -108,7 +92,7 @@ pip install mineru-docparse-mcp
 如果想把 MCP 服务架在一台机器上，让多个客户端远程连接，用 HTTP 模式启动：
 
 ```bash
-MCP_TRANSPORT=streamable-http MCP_PORT=8001 MINERU_OUTPUT_DIR=/data/mineru-output mineru-docparse-mcp
+MCP_TRANSPORT=streamable-http MCP_PORT=8001 MINERU_OUTPUT_DIR=/data/mineru-output uvx mineru-docparse-mcp
 ```
 
 客户端这边改成连 URL：
@@ -132,7 +116,7 @@ MCP_TRANSPORT=streamable-http MCP_PORT=8001 MINERU_OUTPUT_DIR=/data/mineru-outpu
 
 **提示"无法连接 MinerU 服务"** — 确认 `MINERU_API_URL` 能访问：`curl $MINERU_API_URL/health`。stdio 模式下环境变量要写在 MCP 配置的 `env` 里，写在自己终端的 `export` 里不生效。
 
-**大文件一直超时** — 换 `mineru_submit_task` 走后台任务，或调大 `MINERU_API_TIMEOUT`。
+**大文件一直超时** — 调大 `MINERU_API_TIMEOUT` 或缩小 `start_page_id`/`end_page_id` 范围分批解析。
 
 **想要 JSON 而不是 ZIP** — 调用时把 `response_format_zip` 设为 `false`，结果会存成 `.json` 而不是 `.zip`。
 
