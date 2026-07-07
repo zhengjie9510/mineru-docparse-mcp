@@ -1,4 +1,4 @@
-"""MinerU MCP Server — 5 个工具覆盖 DocParse API 全部端点。
+"""MinerU MCP Server — 2 个工具：同步解析 + 健康检查。
 
 保存路径不是接口参数：所有结果统一存到 MINERU_OUTPUT_DIR 环境变量指定的目录，
 这是 server 启动时的固定配置。MinerU 返回什么格式就原样存成什么格式（.zip 或 .json），
@@ -12,12 +12,7 @@ import requests
 from fastmcp import FastMCP
 
 from .client import get_client
-from .models import (
-    ParseDocumentInput,
-    SubmitTaskInput,
-    TaskResultInput,
-    TaskStatusInput,
-)
+from .models import ParseDocumentInput
 
 # ── 服务 ───────────────────────────────────────────────
 mcp = FastMCP("mineru_mcp")
@@ -79,7 +74,7 @@ def _handle_client_error(e: Exception) -> dict:
     if isinstance(e, requests.ConnectionError):
         return {"success": False, "error": "无法连接 MinerU 服务，请确认服务已启动"}
     if isinstance(e, requests.Timeout):
-        return {"success": False, "error": "请求超时，文件可能过大，请使用异步接口"}
+        return {"success": False, "error": "请求超时，文件可能过大，请尝试调整解析参数（如缩小页面范围）"}
     if isinstance(e, requests.HTTPError):
         return {
             "success": False,
@@ -105,15 +100,10 @@ def _handle_client_error(e: Exception) -> dict:
     },
 )
 def mineru_parse_document(params: ParseDocumentInput) -> dict:
-    """【默认优先使用】同步解析本地文档，等待完成后将结果保存到磁盘。
-
-    这是文档解析的默认工具。除非文件明显很大（约超过 100 页）、
-    或用户明确要求后台/异步处理，否则应始终优先调用本工具，
-    而不是 mineru_submit_task。
+    """同步解析本地文档，等待完成后将结果保存到磁盘。
 
     上传文件到 MinerU DocParse API，同步等待解析完成。返回内容原样保存：
     response_format_zip=true（默认）时存为 .zip，为 false 时存为 .json，不做解压或内容解析。
-    适合中小文件（<100 页），大文件请使用 mineru_submit_task 异步接口。
 
     结果保存目录由服务端 MINERU_OUTPUT_DIR 环境变量决定，不是本工具的参数。
 
@@ -149,145 +139,7 @@ def mineru_parse_document(params: ParseDocumentInput) -> dict:
 
 
 # ═══════════════════════════════════════════════════════
-# 工具 2: 异步提交
-# ═══════════════════════════════════════════════════════
-@mcp.tool(
-    name="mineru_submit_task",
-    annotations={
-        "title": "提交异步解析任务",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-)
-def mineru_submit_task(params: SubmitTaskInput) -> dict:
-    """提交文档到 MinerU 异步解析队列，立即返回 task_id。
-
-    仅在文件较大（约超过 100 页）或用户明确要求后台/异步处理时使用。
-    常规文档解析请优先使用 mineru_parse_document（同步接口）。
-
-    不等待解析完成。拿到 task_id 后，使用 mineru_get_task_status 查询进度，
-    完成后用 mineru_get_task_result 下载结果。
-
-    Args:
-        params (SubmitTaskInput): 见 SubmitTaskInput 各字段说明
-
-    Returns:
-        dict:
-        成功: {"success": true, "task_id": str, "status": str,
-                "status_url": str, "result_url": str}
-        失败: {"success": false, "error": str}
-    """
-    if not os.path.isfile(params.file_path):
-        return {"success": False, "error": f"文件不存在: {params.file_path}"}
-
-    client = get_client()
-    try:
-        result = client.submit_task(params.file_path, params.to_form_data())
-        return {"success": True, **result}
-    except Exception as e:
-        return _handle_client_error(e)
-
-
-# ═══════════════════════════════════════════════════════
-# 工具 3: 查询任务状态
-# ═══════════════════════════════════════════════════════
-@mcp.tool(
-    name="mineru_get_task_status",
-    annotations={
-        "title": "查询异步任务状态",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-)
-def mineru_get_task_status(params: TaskStatusInput) -> dict:
-    """查询异步解析任务的当前状态。
-
-    Args:
-        params (TaskStatusInput): 包含 task_id
-
-    Returns:
-        dict:
-        {
-            "success": true,
-            "task_id": str,
-            "status": "queued" | "processing" | "completed" | "failed",
-            "backend": str, "file_names": [str],
-            "error": str|null,           # 失败时的错误信息
-            "queued_tasks": int,         # 前面排队的任务数
-            "processing_tasks": int,     # 正在处理的任务数
-        }
-    """
-    client = get_client()
-    try:
-        status = client.task_status(params.task_id)
-        return {"success": True, **status}
-    except Exception as e:
-        return _handle_client_error(e)
-
-
-# ═══════════════════════════════════════════════════════
-# 工具 4: 获取任务结果
-# ═══════════════════════════════════════════════════════
-@mcp.tool(
-    name="mineru_get_task_result",
-    annotations={
-        "title": "获取异步任务结果",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-)
-def mineru_get_task_result(params: TaskResultInput) -> dict:
-    """获取已完成异步任务的解析结果，原样保存到磁盘。
-
-    仅当任务状态为 completed 时才能获取结果。
-    建议先调用 mineru_get_task_status 确认状态后再取结果。
-
-    返回内容原样保存，不做解压或内容解析（是 .zip 还是 .json 取决于
-    提交任务时 response_format_zip 参数的取值）。
-    结果保存目录由服务端 MINERU_OUTPUT_DIR 环境变量决定，不是本工具的参数。
-
-    Args:
-        params (TaskResultInput): 包含 task_id
-
-    Returns:
-        dict:
-        成功: {"success": true, "file_name": str, "saved_path": str, "file_size": int, "format": "zip"|"json"}
-        失败: {"success": false, "error": str}
-    """
-    output_dir, err = _get_output_dir()
-    if err is not None:
-        return err
-
-    client = get_client()
-    try:
-        response = client.task_result(params.task_id)
-        response.raise_for_status()
-    except Exception as e:
-        return _handle_client_error(e)
-
-    content_type = response.headers.get("Content-Type", "")
-
-    file_name = f"{params.task_id}"
-    try:
-        st = client.task_status(params.task_id)
-        names = st.get("file_names", [])
-        if names:
-            file_name = os.path.splitext(names[0])[0]
-    except Exception:
-        pass
-
-    result = _save_response(response.content, content_type, file_name, output_dir)
-    return {"success": True, "file_name": file_name, **result}
-
-
-# ═══════════════════════════════════════════════════════
-# 工具 5: 健康检查
+# 工具 2: 健康检查
 # ═══════════════════════════════════════════════════════
 @mcp.tool(
     name="mineru_health_check",

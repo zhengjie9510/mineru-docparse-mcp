@@ -1,4 +1,4 @@
-"""MinerU DocParse API 客户端 — 封装所有 HTTP 请求。"""
+"""MinerU DocParse API 客户端 — 封装 HTTP 请求。"""
 
 import os
 
@@ -39,43 +39,6 @@ class MinerUClient:
                 data=form_data,
                 timeout=self.timeout,
             )
-
-    # ── 异步提交 ──────────────────────────────────────
-    def submit_task(self, file_path: str, form_data: dict) -> dict:
-        """POST /tasks — 提交异步解析任务，立即返回。
-
-        Args:
-            file_path: 本地文件路径
-            form_data: 已序列化的表单字段（来自 SubmitTaskInput.to_form_data()）
-
-        Returns:
-            dict: {"task_id": "...", "status": "queued", ...}
-        """
-        filename = os.path.basename(file_path)
-        with open(file_path, "rb") as f:
-            r = requests.post(
-                f"{self.base_url}/tasks",
-                files={"files": (filename, f)},
-                data=form_data,
-                timeout=self.timeout,
-            )
-        r.raise_for_status()
-        return r.json()
-
-    # ── 查询任务状态 ──────────────────────────────────
-    def task_status(self, task_id: str) -> dict:
-        """GET /tasks/{task_id}"""
-        r = requests.get(f"{self.base_url}/tasks/{task_id}", timeout=30)
-        r.raise_for_status()
-        return r.json()
-
-    # ── 获取任务结果 ──────────────────────────────────
-    def task_result(self, task_id: str) -> requests.Response:
-        """GET /tasks/{task_id}/result — 返回原始 Response（ZIP 或 JSON）。"""
-        return requests.get(
-            f"{self.base_url}/tasks/{task_id}/result",
-            timeout=self.timeout,
-        )
 
 
 # ── 单例 ──────────────────────────────────────────────
