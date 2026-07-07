@@ -134,7 +134,7 @@ class ParseDocumentInput(BaseModel):
     return_content_list: bool = Field(
         default=False, description="响应中返回内容列表 JSON，默认 False"
     )
-    return_images: bool = Field(default=False, description="响应中返回提取出的图片，默认 False")
+    return_images: bool = Field(default=True, description="响应中返回提取出的图片，默认 False")
     response_format_zip: bool = Field(
         default=True,
         description="以 ZIP 文件形式返回结果（而非 JSON）。"
