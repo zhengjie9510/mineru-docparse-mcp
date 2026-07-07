@@ -1,9 +1,4 @@
-"""MinerU MCP Server — 2 个工具：同步解析 + 健康检查。
-
-保存路径不是接口参数：所有结果统一存到 MINERU_OUTPUT_DIR 环境变量指定的目录，
-这是 server 启动时的固定配置。MinerU 返回什么格式就原样存成什么格式（.zip 或 .json），
-本项目不做解压或内容解析。
-"""
+"""MinerU MCP Server — 同步文档解析 + 健康检查。"""
 
 import os
 from datetime import datetime, timezone
@@ -14,17 +9,13 @@ from fastmcp import FastMCP
 from .client import get_client
 from .models import ParseDocumentInput
 
-# ── 服务 ───────────────────────────────────────────────
+# ── 服务 ──
 mcp = FastMCP("mineru_mcp")
 
 
-# ── 工具函数 ───────────────────────────────────────────
+# ── 工具函数 ──
 def _get_output_dir() -> tuple[str | None, dict | None]:
-    """从 MINERU_OUTPUT_DIR 环境变量读取输出目录。这是 server 级配置，不是接口参数。
-
-    Returns:
-        (output_dir, error) — 成功时 error 为 None；未配置或配置不合法时 output_dir 为 None。
-    """
+    """读取 MINERU_OUTPUT_DIR 环境变量，相对路径以 cwd 为基准解析。"""
     output_dir = os.getenv("MINERU_OUTPUT_DIR")
     if not output_dir:
         return None, {
@@ -33,23 +24,12 @@ def _get_output_dir() -> tuple[str | None, dict | None]:
             "请在启动 mineru-docparse-mcp 时设置该环境变量后重试",
         }
     if not os.path.isabs(output_dir):
-        return None, {
-            "success": False,
-            "error": f"MINERU_OUTPUT_DIR 必须是绝对路径: {output_dir}",
-        }
+        output_dir = os.path.normpath(os.path.join(os.getcwd(), output_dir))
     return output_dir, None
 
 
 def _save_response(content: bytes, content_type: str, base_name: str, output_dir: str) -> dict:
-    """把 MinerU 的响应原样存到磁盘，不解压、不解析内容。
-
-    存成 .zip 还是 .json 完全由响应的 Content-Type 决定：
-    - zip / octet-stream → 原样存为 .zip
-    - json → 原样存为 .json（其中可能包含 md_content 等字段，取决于调用时的 return_* 参数）
-
-    Returns:
-        {"saved_path": str, "file_size": int, "format": "zip"|"json"}
-    """
+    """原样保存响应到磁盘。根据 Content-Type 自动选择 .zip 或 .json。"""
     os.makedirs(output_dir, exist_ok=True)
 
     if "json" in content_type:
@@ -86,34 +66,12 @@ def _handle_client_error(e: Exception) -> dict:
     return {"success": False, "error": f"未知错误: {e}"}
 
 
-# ═══════════════════════════════════════════════════════
-# 工具 1: 同步解析
-# ═══════════════════════════════════════════════════════
-@mcp.tool(
-    name="mineru_parse_document",
-    annotations={
-        "title": "同步解析文档为 Markdown",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-)
+# ── 同步解析 ──
+@mcp.tool()
 def mineru_parse_document(params: ParseDocumentInput) -> dict:
-    """同步解析本地文档，等待完成后将结果保存到磁盘。
+    """将 PDF · DOCX · PPTX · XLSX · 图片 · 网页转为结构化 Markdown / JSON
 
-    上传文件到 MinerU DocParse API，同步等待解析完成。返回内容原样保存：
-    response_format_zip=true（默认）时存为 .zip，为 false 时存为 .json，不做解压或内容解析。
-
-    结果保存目录由服务端 MINERU_OUTPUT_DIR 环境变量决定，不是本工具的参数。
-
-    Args:
-        params (ParseDocumentInput): 见 ParseDocumentInput 各字段说明
-
-    Returns:
-        dict:
-        成功: {"success": true, "file_name": str, "saved_path": str, "file_size": int, "format": "zip"|"json"}
-        失败: {"success": false, "error": str}
+    上传文件到 MinerU DocParse API 进行内容提取
     """
     if not os.path.isfile(params.file_path):
         return {"success": False, "error": f"文件不存在: {params.file_path}"}
@@ -138,33 +96,10 @@ def mineru_parse_document(params: ParseDocumentInput) -> dict:
     return {"success": True, "file_name": file_name, **result}
 
 
-# ═══════════════════════════════════════════════════════
-# 工具 2: 健康检查
-# ═══════════════════════════════════════════════════════
-@mcp.tool(
-    name="mineru_health_check",
-    annotations={
-        "title": "MinerU 服务健康检查",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-)
+# ── 健康检查 ──
+@mcp.tool()
 def mineru_health_check() -> dict:
-    """检查 MinerU DocParse API 服务是否正常运行。
-
-    Returns:
-        dict:
-        {
-            "success": true,
-            "status": "healthy",
-            "version": "3.4.2",
-            "queued_tasks": int,         # 当前排队任务数
-            "processing_tasks": int,      # 当前处理中任务数
-            "max_concurrent_requests": int,
-        }
-    """
+    """检查 MinerU DocParse API 服务是否正常运行。"""
     client = get_client()
     try:
         info = client.health()
@@ -173,27 +108,9 @@ def mineru_health_check() -> dict:
         return _handle_client_error(e)
 
 
-# ── 入口 ───────────────────────────────────────────────
-_VALID_TRANSPORTS = ("stdio", "streamable-http")
-
-
 def main():
-    """CLI 入口点。
-
-    通过环境变量切换传输模式:
-
-    stdio 模式（默认，本地子进程，适合 Claude Code / Cursor 等客户端）:
-        mineru-docparse-mcp
-
-    Streamable HTTP 模式（远程服务，支持多客户端连接）:
-        MCP_TRANSPORT=streamable-http MCP_PORT=8001 mineru-docparse-mcp
-    """
+    """CLI 入口。MCP_TRANSPORT=streamable-http 启用 HTTP 模式，默认 stdio。"""
     transport = os.getenv("MCP_TRANSPORT", "stdio")
-
-    if transport not in _VALID_TRANSPORTS:
-        raise ValueError(
-            f"不支持的 MCP_TRANSPORT: {transport!r}，仅支持 {' / '.join(_VALID_TRANSPORTS)}"
-        )
 
     if transport == "streamable-http":
         host = os.getenv("MCP_HOST", "127.0.0.1")

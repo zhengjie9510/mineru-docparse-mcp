@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mineru-mcp": {
+      "command": "uv",
+      "args": ["run", "mineru-docparse-mcp"],
+      "env": {
+        "MINERU_API_URL": "http://localhost:8000",
+        "MINERU_OUTPUT_DIR": "mineru-output"
+      }
+    }
+  }
+}

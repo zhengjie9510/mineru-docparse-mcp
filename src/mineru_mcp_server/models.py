@@ -1,17 +1,12 @@
-"""Pydantic 输入模型 — 每个 MCP 工具对应一个独立的 Input Model。
-
-字段与官方 MinerU DocParse OpenAPI schema 保持一致（含默认值），
-仅 response_format_zip 的默认值按本项目需要调整为 True（见下方说明）。
-"""
+"""Pydantic 输入模型，字段与 MinerU DocParse OpenAPI schema 保持一致。"""
 
 import os
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-# ── 枚举（与官方 schema 的 enum 取值一致）──────────────
+# ── 枚举 ──
 class Backend(str, Enum):
     """解析后端"""
     PIPELINE = "pipeline"
@@ -50,10 +45,11 @@ class Effort(str, Enum):
     HIGH = "high"
 
 
-def _validate_absolute_path(v: str) -> str:
-    if not os.path.isabs(v):
-        raise ValueError(f"必须使用绝对路径: {v}")
-    return v
+def _resolve_file_path(v: str) -> str:
+    """将 file_path 解析为绝对路径。相对路径以当前工作目录为基准。"""
+    if os.path.isabs(v):
+        return v
+    return os.path.normpath(os.path.join(os.getcwd(), v))
 
 
 def _check_page_range(model):
@@ -90,22 +86,18 @@ def _to_form_data(model) -> dict:
     return data
 
 
-# ═══════════════════════════════════════════════════════
-# POST /file_parse — 同步解析
-# ═══════════════════════════════════════════════════════
+# ── POST /file_parse ──
 class ParseDocumentInput(BaseModel):
-    """mineru_parse_document 的输入参数。
+    """mineru_parse_document 的输入参数，对应官方 POST /file_parse 接口。
 
-    对应官方接口 POST /file_parse。字段与默认值均与官方 OpenAPI schema 一致，
-    仅 response_format_zip 默认改为 True（本项目按文件形式落盘，而非返回大段 JSON 文本）。
-
-    保存路径不是接口参数：解析结果统一存到 MINERU_OUTPUT_DIR 环境变量指定的目录，
-    这是 server 启动时的固定配置，不随每次调用改变。
+    字段及默认值与官方 OpenAPI schema 一致，仅 response_format_zip 默认改为 True。
     """
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     file_path: str = Field(
-        ..., min_length=1, description="本地文档绝对路径（.docx/.pdf/.pptx/.xlsx 等）"
+        ...,
+        min_length=1,
+        description="本地文档路径，支持绝对路径和相对路径（相对路径以当前工作目录为基准）",
     )
     lang_list: list[Lang] = Field(
         default=[Lang.CH],
@@ -128,7 +120,7 @@ class ParseDocumentInput(BaseModel):
     image_analysis: bool = Field(
         default=True, description="启用图片/图表分析（VLM/hybrid 后端生效），默认 True"
     )
-    server_url: Optional[str] = Field(
+    server_url: str | None = Field(
         default=None,
         description="仅 *-http-client 后端需要，OpenAI 兼容服务器地址，如 http://127.0.0.1:30000。默认不设置",
     )
@@ -163,8 +155,8 @@ class ParseDocumentInput(BaseModel):
 
     @field_validator("file_path")
     @classmethod
-    def _validate_file_path(cls, v: str) -> str:
-        return _validate_absolute_path(v)
+    def _resolve_file_path_validator(cls, v: str) -> str:
+        return _resolve_file_path(v)
 
     def to_form_data(self) -> dict:
         return _to_form_data(self)
